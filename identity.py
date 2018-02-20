@@ -24,6 +24,8 @@ datafile = "simple.txt"
 
 MAX_LENGTH = 10
 
+train = False
+
 class Lang:
     def __init__(self, name):
         self.name = name
@@ -351,71 +353,6 @@ def time_since(since, percent):
     rs = es - s
     return '%s (- %s)' % (as_minutes(s), as_minutes(rs))
 
-attn_model = 'general'
-hidden_size = 50
-n_layers = 2
-dropout_p = 0.05
-
-# Initialize models
-encoder = EncoderRNN(vocab.n_words, hidden_size, n_layers)
-decoder = AttnDecoderRNN(attn_model, hidden_size, vocab.n_words, n_layers, dropout_p=dropout_p)
-
-# Move models to GPU
-if USE_CUDA:
-    encoder.cuda()
-    decoder.cuda()
-
-# Initialize optimizers and criterion
-learning_rate = 0.0001
-encoder_optimizer = optim.Adam(encoder.parameters(), lr=learning_rate)
-decoder_optimizer = optim.Adam(decoder.parameters(), lr=learning_rate)
-criterion = nn.NLLLoss()
-
-# Configuring training
-n_epochs = 50
-plot_every = 200
-print_every = 1000
-
-# Keep track of time elapsed and running averages
-start = time.time()
-plot_losses = []
-print_loss_total = 0 # Reset every print_every
-plot_loss_total = 0 # Reset every plot_every
-
-# Begin!
-for epoch in range(1, n_epochs+1):
-    if epoch % 5 == 0:
-        print("On epoch %d" % epoch)
-    
-    # Get training data for this cycle
-    training_pair = variables_from_pair(random.choice(pairs))
-    input_variable = training_pair[0]
-    target_variable = training_pair[1]
-
-    # Run the train function
-    loss = train(input_variable, target_variable, encoder, decoder, encoder_optimizer, decoder_optimizer, criterion)
-
-    # Keep track of loss
-    print_loss_total += loss
-    plot_loss_total += loss
-    if epoch == 0: continue
-
-    if epoch % print_every == 0:
-        print_loss_avg = print_loss_total / print_every
-        print_loss_total = 0
-        print_summary = '%s (%d %d%%) %.4f' % (time_since(start, epoch / n_epochs), epoch, epoch / n_epochs * 100, print_loss_avg)
-        print(print_summary)
-
-    if epoch % plot_every == 0:
-        plot_loss_avg = plot_loss_total / plot_every
-        plot_losses.append(plot_loss_avg)
-        plot_loss_total = 0
-        torch.save(encoder, 'encoder.pt')
-        torch.save(decoder, 'decoder.pt')
-
-torch.save(encoder, 'encoder.pt')
-torch.save(decoder, 'decoder.pt')
-
 def evaluate(sentence, max_length=MAX_LENGTH):
     input_variable = variable_from_sentence(vocab, sentence)
     input_length = input_variable.size()[0]
@@ -474,9 +411,79 @@ def show_plot(points):
     ax.yaxis.set_major_locator(loc)
     plt.plot(points)
 
-show_plot(plot_losses)
+if train:
+    attn_model = 'general'
+    hidden_size = 50
+    n_layers = 2
+    dropout_p = 0.05
 
-evaluate_randomly()
+    # Initialize models
+    encoder = EncoderRNN(vocab.n_words, hidden_size, n_layers)
+    decoder = AttnDecoderRNN(attn_model, hidden_size, vocab.n_words, n_layers, dropout_p=dropout_p)
+
+    # Move models to GPU
+    if USE_CUDA:
+        encoder.cuda()
+        decoder.cuda()
+
+    # Initialize optimizers and criterion
+    learning_rate = 0.0001
+    encoder_optimizer = optim.Adam(encoder.parameters(), lr=learning_rate)
+    decoder_optimizer = optim.Adam(decoder.parameters(), lr=learning_rate)
+    criterion = nn.NLLLoss()
+
+    # Configuring training
+    n_epochs = 5
+    plot_every = 200
+    print_every = 1000
+
+    # Keep track of time elapsed and running averages
+    start = time.time()
+    plot_losses = []
+    print_loss_total = 0 # Reset every print_every
+    plot_loss_total = 0 # Reset every plot_every
+
+    # Begin!
+    for epoch in range(1, n_epochs+1):
+        if epoch % 5 == 0:
+            print("On epoch %d" % epoch)
+        
+        # Get training data for this cycle
+        training_pair = variables_from_pair(random.choice(pairs))
+        input_variable = training_pair[0]
+        target_variable = training_pair[1]
+
+        # Run the train function
+        loss = train(input_variable, target_variable, encoder, decoder, encoder_optimizer, decoder_optimizer, criterion)
+
+        # Keep track of loss
+        print_loss_total += loss
+        plot_loss_total += loss
+        if epoch == 0: continue
+
+        if epoch % print_every == 0:
+            print_loss_avg = print_loss_total / print_every
+            print_loss_total = 0
+            print_summary = '%s (%d %d%%) %.4f' % (time_since(start, epoch / n_epochs), epoch, epoch / n_epochs * 100, print_loss_avg)
+            print(print_summary)
+
+        if epoch % plot_every == 0:
+            plot_loss_avg = plot_loss_total / plot_every
+            plot_losses.append(plot_loss_avg)
+            plot_loss_total = 0
+            torch.save(encoder, 'encoder.pt')
+            torch.save(decoder, 'decoder.pt')
+
+    torch.save(encoder, 'encoder.pt')
+    torch.save(decoder, 'decoder.pt')
+
+    show_plot(plot_losses)
+
+    evaluate_randomly()
+else:
+    encoder = torch.load('encoder.pt')
+    decoder = torch.load('decoder.pt')
+    evaluate_randomly()
 
 
 

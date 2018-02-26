@@ -27,7 +27,7 @@ MAX_LENGTH = 10
 to_train = True
 
 # Configuring training
-n_epochs = 50
+n_epochs = 500
 plot_every = 200
 print_every = 1000
 
@@ -38,7 +38,7 @@ class Lang:
         self.word2count = {}
         self.index2word = {0: "SOS", 1: "EOS"}
         self.n_words = 2 # Count SOS and EOS
-      
+
     def index_words(self, sentence):
         for word in sentence.split(' '):
             self.index_word(word)
@@ -63,16 +63,16 @@ def read_sentences():
 
     # Read the file and split into lines
     lines = open(datafile).read().strip().split('\n')
-    
+
     # normalize
     pairs = [[normalize_string(l), normalize_string(l)] for l in lines]
-    
+
     return pairs
 
 def prepare_data(vocab):
     pairs = read_sentences()
     print("Read %s sentences" % len(pairs))
-    
+
     print("Indexing words...")
     for pair in pairs:
         vocab.index_words(pair[0])
@@ -104,14 +104,14 @@ def variables_from_pair(pair):
 class EncoderRNN(nn.Module):
     def __init__(self, input_size, hidden_size, n_layers=1):
         super(EncoderRNN, self).__init__()
-        
+
         self.input_size = input_size
         self.hidden_size = hidden_size
         self.n_layers = n_layers
-        
+
         self.embedding = nn.Embedding(input_size, hidden_size)
         self.gru = nn.GRU(hidden_size, hidden_size, n_layers)
-        
+
     def forward(self, word_inputs, hidden):
         # Note: we run this all at once (over the whole input sequence)
         seq_len = len(word_inputs)
@@ -125,174 +125,35 @@ class EncoderRNN(nn.Module):
         return hidden
 
 class DecoderRNN(nn.Module):
-    def __init__(self, input_size, hidden_size, n_layers=1):
+    def __init__(self, output_size, hidden_size, n_layers=1):
         super(DecoderRNN, self).__init__()
-
-        self.input_size = input_size
         self.hidden_size = hidden_size
-        self.n_layers = n_layers
-        self.embedding = nn.Embedding(input_size, hidden_size)
+
+        self.embedding = nn.Embedding(output_size, hidden_size)
         self.gru = nn.GRU(hidden_size, hidden_size, n_layers)
+        self.out = nn.Linear(hidden_size, output_size)
+        self.softmax = nn.LogSoftmax(dim=1)
 
-    def forward(self, word_input, last_hidden, encoder_outputs):
-
-
-        # Note: we run this one step at a time
-
-        # Get the embedding of the current input word (last output word)
-        word_embedded = self.embedding(word_input).view(1, 1, -1) # S=1 x B x N
-        rnn_output, hidden = self.gru(word_embedded, last_hidden)
-
-
-        # Final output layer (next word prediction) using the RNN hidden state and context vector
-        rnn_output = rnn_output.squeeze(0) # S=1 x B x N -> B x N
-        output = F.log_softmax(rnn_output, dim=0)
-        # Return final output, hidden state, and attention weights (for visualization)
+    def forward(self, input, hidden):
+        output = self.embedding(input).view(1, 1, -1)
+        output = F.relu(output)
+        output, hidden = self.gru(output, hidden)
+        output = self.softmax(self.out(output[0]))
         return output, hidden
 
-
-    def init_hidden(self):
-        hidden = Variable(torch.zeros(self.n_layers, 1, self.hidden_size))
-        if USE_CUDA: hidden = hidden.cuda()
-        return hidden
-
-# One attention decoder
-
-class BahdanauAttnDecoderRNN(nn.Module):
-    def __init__(self, hidden_size, output_size, n_layers=1, dropout_p=0.1):
-        super(AttnDecoderRNN, self).__init__()
-        
-        # Define parameters
-        self.hidden_size = hidden_size
-        self.output_size = output_size
-        self.n_layers = n_layers
-        self.dropout_p = dropout_p
-        self.max_length = max_length
-        
-        # Define layers
-        self.embedding = nn.Embedding(output_size, hidden_size)
-        self.dropout = nn.Dropout(dropout_p)
-        self.attn = GeneralAttn(hidden_size)
-        self.gru = nn.GRU(hidden_size * 2, hidden_size, n_layers, dropout=dropout_p)
-        self.out = nn.Linear(hidden_size, output_size)
-    
-    def forward(self, word_input, last_hidden, encoder_outputs):
-        # Note that we will only be running forward for a single decoder time step, but will use all encoder outputs
-        
-        # Get the embedding of the current input word (last output word)
-        word_embedded = self.embedding(word_input).view(1, 1, -1) # S=1 x B x N
-        word_embedded = self.dropout(word_embedded)
-        
-        # Calculate attention weights and apply to encoder outputs
-        attn_weights = self.attn(last_hidden[-1], encoder_outputs)
-        context = attn_weights.bmm(encoder_outputs.transpose(0, 1)) # B x 1 x N
-        
-        # Combine embedded input word and attended context, run through RNN
-        rnn_input = torch.cat((word_embedded, context), 2)
-        output, hidden = self.gru(rnn_input, last_hidden)
-        
-        # Final output layer
-        output = output.squeeze(0) # B x N
-        output = F.log_softmax(self.out(torch.cat((output, context), 1)), dim=0)
-        
-        # Return final output, hidden state, and attention weights (for visualization)
-        return output, hidden, attn_weights
-
-# Another attention decoder in the next two classes.
-
-class Attn(nn.Module):
-    def __init__(self, method, hidden_size, max_length=MAX_LENGTH):
-        super(Attn, self).__init__()
-        
-        self.method = method
-        self.hidden_size = hidden_size
-        
-        if self.method == 'general':
-            self.attn = nn.Linear(self.hidden_size, hidden_size)
-
-        elif self.method == 'concat':
-            self.attn = nn.Linear(self.hidden_size * 2, hidden_size)
-            self.other = nn.Parameter(torch.FloatTensor(1, hidden_size))
-
-    def forward(self, hidden, encoder_outputs):
-        seq_len = len(encoder_outputs)
-
-        # Create variable to store attention energies
-        attn_energies = Variable(torch.zeros(seq_len)) # B x 1 x S
-        if USE_CUDA: attn_energies = attn_energies.cuda()
-
-        # Calculate energies for each encoder output
-        for i in range(seq_len):
-            attn_energies[i] = self.score(hidden, encoder_outputs[i])
-
-        # Normalize energies to weights in range 0 to 1, resize to 1 x 1 x seq_len
-        return F.softmax(attn_energies, dim=0).unsqueeze(0).unsqueeze(0)
-    
-    def score(self, hidden, encoder_output):
-        
-        if self.method == 'dot':
-            energy = hidden.dot(encoder_output)
-            return energy
-        
-        elif self.method == 'general':
-            energy = self.attn(encoder_output)
-            energy = hidden.dot(energy)
-            return energy
-        
-        elif self.method == 'concat':
-            energy = self.attn(torch.cat((hidden, encoder_output), 1))
-            energy = self.other.dot(energy)
-            return energy
-
-class AttnDecoderRNN(nn.Module):
-    def __init__(self, attn_model, hidden_size, output_size, n_layers=1, dropout_p=0.1):
-        super(AttnDecoderRNN, self).__init__()
-        
-        # Keep parameters for reference
-        self.attn_model = attn_model
-        self.hidden_size = hidden_size
-        self.output_size = output_size
-        self.n_layers = n_layers
-        self.dropout_p = dropout_p
-        
-        # Define layers
-        self.embedding = nn.Embedding(output_size, hidden_size)
-        self.gru = nn.GRU(hidden_size * 2, hidden_size, n_layers, dropout=dropout_p)
-        self.out = nn.Linear(hidden_size * 2, output_size)
-        
-        # Choose attention model
-        if attn_model != 'none':
-            self.attn = Attn(attn_model, hidden_size)
-    
-    def forward(self, word_input, last_context, last_hidden, encoder_outputs):
-        # Note: we run this one step at a time
-        
-        # Get the embedding of the current input word (last output word)
-        word_embedded = self.embedding(word_input).view(1, 1, -1) # S=1 x B x N
-        
-        # Combine embedded input word and last context, run through RNN
-        rnn_input = torch.cat((word_embedded, last_context.unsqueeze(0)), 2)
-        rnn_output, hidden = self.gru(rnn_input, last_hidden)
-
-        # Calculate attention from current RNN state and all encoder outputs; apply to encoder outputs
-        attn_weights = self.attn(rnn_output.squeeze(0), encoder_outputs)
-        context = attn_weights.bmm(encoder_outputs.transpose(0, 1)) # B x 1 x N
-        
-        # Final output layer (next word prediction) using the RNN hidden state and context vector
-        rnn_output = rnn_output.squeeze(0) # S=1 x B x N -> B x N
-        context = context.squeeze(1)       # B x S=1 x N -> B x N
-        output = F.log_softmax(self.out(torch.cat((rnn_output, context), 1)), dim=0)
-        
-        # Return final output, hidden state, and attention weights (for visualization)
-        return output, context, hidden, attn_weights
+    def initHidden(self):
+        result = Variable(torch.zeros(1, 1, self.hidden_size))
+        if use_cuda:
+            return result.cuda()
+        else:
+            return result
 
 # Train!
 
-teacher_forcing_ratio = 0.5
+teacher_forcing_ratio = 0
 clip = 5.0
 
 def train(input_variable, target_variable, encoder, decoder, encoder_optimizer, decoder_optimizer, criterion, max_length=MAX_LENGTH):
-
     # Zero gradients of both optimizers
     encoder_optimizer.zero_grad()
     decoder_optimizer.zero_grad()
@@ -305,48 +166,43 @@ def train(input_variable, target_variable, encoder, decoder, encoder_optimizer, 
     # Run words through encoder
     encoder_hidden = encoder.init_hidden()
     encoder_outputs, encoder_hidden = encoder(input_variable, encoder_hidden)
-    
+
     # Prepare input and output variables
     decoder_input = Variable(torch.LongTensor([[SOS_token]]))
-    decoder_context = Variable(torch.zeros(1, decoder.hidden_size))
     decoder_hidden = encoder_hidden # Use last hidden state from encoder to start decoder
     if USE_CUDA:
         decoder_input = decoder_input.cuda()
-        decoder_context = decoder_context.cuda()
 
     # Choose whether to use teacher forcing
     use_teacher_forcing = random.random() < teacher_forcing_ratio
     if use_teacher_forcing:
-        
         # Teacher forcing: Use the ground-truth target as the next input
         for di in range(target_length):
-            decoder_output, decoder_hidden = decoder(decoder_input, decoder_hidden, encoder_outputs)
+            decoder_output, decoder_hidden = decoder(decoder_input, decoder_hidden)
             loss += criterion(decoder_output, target_variable[di])
             decoder_input = target_variable[di] # Next target is next input
 
     else:
         # Without teacher forcing: use network's own prediction as the next input
         for di in range(target_length):
-            decoder_output, decoder_hidden= decoder(decoder_input, decoder_hidden, encoder_outputs)
+            decoder_output, decoder_hidden = decoder(decoder_input, decoder_hidden)
             loss += criterion(decoder_output, target_variable[di])
-            
             # Get most likely word index (highest value) from output
             topv, topi = decoder_output.data.topk(1)
             ni = topi[0][0]
-            
+
             decoder_input = Variable(torch.LongTensor([[ni]])) # Chosen word is next input
             if USE_CUDA: decoder_input = decoder_input.cuda()
 
             # Stop at end of sentence (not necessary when using known targets)
             if ni == EOS_token: break
-
     # Backpropagation
     loss.backward()
     torch.nn.utils.clip_grad_norm(encoder.parameters(), clip)
     torch.nn.utils.clip_grad_norm(decoder.parameters(), clip)
     encoder_optimizer.step()
     decoder_optimizer.step()
-    
+
     return loss.data[0] / target_length
 
 def as_minutes(s):
@@ -364,7 +220,7 @@ def time_since(since, percent):
 def evaluate(sentence, max_length=MAX_LENGTH):
     input_variable = variable_from_sentence(vocab, sentence)
     input_length = input_variable.size()[0]
-    
+
     # Run through encoder
     encoder_hidden = encoder.init_hidden()
     encoder_outputs, encoder_hidden = encoder(input_variable, encoder_hidden)
@@ -375,23 +231,22 @@ def evaluate(sentence, max_length=MAX_LENGTH):
         decoder_input = decoder_input.cuda()
 
     decoder_hidden = encoder_hidden
-    
+
     decoded_words = []
-    
+
     # Run through decoder
     for di in range(max_length):
-        decoder_output, decoder_hidden, = decoder(decoder_input, decoder_hidden, encoder_outputs)
-        decoder_attentions[di,:decoder_attention.size(2)] += decoder_attention.squeeze(0).squeeze(0).cpu().data
+        decoder_output, decoder_hidden, = decoder(decoder_input, decoder_hidden)
 
         # Choose top word from output
         topv, topi = decoder_output.data.topk(1)
         ni = topi[0][0]
         if ni == EOS_token:
-            decoded_words.append('<EOS>')
+            decoded_words.append('EOS')
             break
         else:
             decoded_words.append(vocab.index2word[ni])
-            
+
         # Next input is chosen word
         decoder_input = Variable(torch.LongTensor([[ni]]))
         if USE_CUDA: decoder_input = decoder_input.cuda()
@@ -399,10 +254,10 @@ def evaluate(sentence, max_length=MAX_LENGTH):
 
 def evaluate_randomly():
     pair = random.choice(pairs)
-    
+
     output_words = evaluate(pair[0])
     output_sentence = ' '.join(output_words)
-    
+
     print('>', pair[0])
     print('=', pair[1])
     print('<', output_sentence)
@@ -439,20 +294,17 @@ if to_train:
     plot_losses = []
     print_loss_total = 0 # Reset every print_every
     plot_loss_total = 0 # Reset every plot_every
-    print("About to begin training.")
+
     # Begin!
     for epoch in range(1, n_epochs+1):
         if epoch % 5 == 0:
             print("On epoch %d" % epoch)
-        
         # Get training data for this cycle
         training_pair = variables_from_pair(random.choice(pairs))
         input_variable = training_pair[0]
         target_variable = training_pair[1]
-
         # Run the train function
         loss = train(input_variable, target_variable, encoder, decoder, encoder_optimizer, decoder_optimizer, criterion)
-
         # Keep track of loss
         print_loss_total += loss
         plot_loss_total += loss

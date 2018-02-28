@@ -20,15 +20,17 @@ USE_CUDA = True
 SOS_token = 0
 EOS_token = 1
 
-datafile = "simple.txt"
+datafile = "100.txt"
 
 MAX_LENGTH = 10
 
-to_train = True
+to_train = False
+
+random_pair = False
 
 # Configuring training
-n_epochs = 500
-plot_every = 200
+n_epochs = 50000
+plot_every = 50
 print_every = 1000
 
 class Lang:
@@ -102,21 +104,22 @@ def variables_from_pair(pair):
     return (input_variable, target_variable)
 
 class EncoderRNN(nn.Module):
-    def __init__(self, input_size, hidden_size, n_layers=1):
+    def __init__(self, vocab_size, embedding_size, hidden_size, n_layers=1):
         super(EncoderRNN, self).__init__()
 
-        self.input_size = input_size
+        self.vocab_size = vocab_size
+        self.embedding_size = embedding_size
         self.hidden_size = hidden_size
         self.n_layers = n_layers
 
-        self.embedding = nn.Embedding(input_size, hidden_size)
-        self.gru = nn.GRU(hidden_size, hidden_size, n_layers)
+        self.embedding = nn.Embedding(vocab_size, embedding_size)
+        self.lstm = nn.LSTM(embedding_size, hidden_size, n_layers)
 
     def forward(self, word_inputs, hidden):
         # Note: we run this all at once (over the whole input sequence)
         seq_len = len(word_inputs)
         embedded = self.embedding(word_inputs).view(seq_len, 1, -1)
-        output, hidden = self.gru(embedded, hidden)
+        output, hidden = self.lstm(embedded, hidden)
         return output, hidden
 
     def init_hidden(self):
@@ -124,33 +127,44 @@ class EncoderRNN(nn.Module):
         if USE_CUDA: hidden = hidden.cuda()
         return hidden
 
+    def init_cell(self):
+        cell = Variable(torch.zeros(self.n_layers, 1, self.hidden_size))
+        if USE_CUDA: cell = cell.cuda()
+        return cell
+
 class DecoderRNN(nn.Module):
-    def __init__(self, output_size, hidden_size, n_layers=1):
+    def __init__(self, vocab_size, embedding_size, hidden_size, n_layers=1):
         super(DecoderRNN, self).__init__()
+
+        self.vocab_size = vocab_size
+        self.embedding_size = embedding_size
         self.hidden_size = hidden_size
 
-        self.embedding = nn.Embedding(output_size, hidden_size)
-        self.gru = nn.GRU(hidden_size, hidden_size, n_layers)
-        self.out = nn.Linear(hidden_size, output_size)
+        self.embedding = nn.Embedding(vocab_size, embedding_size)
+        self.lstm = nn.LSTM(hidden_size, embedding_size, n_layers)
+        self.out = nn.Linear(hidden_size, vocab_size)
         self.softmax = nn.LogSoftmax(dim=1)
 
     def forward(self, input, hidden):
         output = self.embedding(input).view(1, 1, -1)
-        output = F.relu(output)
-        output, hidden = self.gru(output, hidden)
+        # output = F.softmax(output)
+        output, hidden = self.lstm(output, hidden)
         output = self.softmax(self.out(output[0]))
         return output, hidden
 
-    def initHidden(self):
-        result = Variable(torch.zeros(1, 1, self.hidden_size))
-        if use_cuda:
-            return result.cuda()
-        else:
-            return result
+    def init_hidden(self):
+        hidden = Variable(torch.zeros(self.n_layers, 1, self.hidden_size))
+        if USE_CUDA: hidden = hidden.cuda()
+        return hidden
+
+    def init_cell(self):
+        cell = Variable(torch.zeros(self.n_layers, 1, self.hidden_size))
+        if USE_CUDA: cell = cell.cuda()
+        return cell
 
 # Train!
 
-teacher_forcing_ratio = 0
+teacher_forcing_ratio = 0.5
 clip = 5.0
 
 def train(input_variable, target_variable, encoder, decoder, encoder_optimizer, decoder_optimizer, criterion, max_length=MAX_LENGTH):
@@ -165,11 +179,13 @@ def train(input_variable, target_variable, encoder, decoder, encoder_optimizer, 
 
     # Run words through encoder
     encoder_hidden = encoder.init_hidden()
-    encoder_outputs, encoder_hidden = encoder(input_variable, encoder_hidden)
+    encoder_cell = encoder.init_cell()
+    encoder_outputs, (encoder_hidden, encoder_cell) = encoder(input_variable, (encoder_hidden, encoder_cell))
 
     # Prepare input and output variables
     decoder_input = Variable(torch.LongTensor([[SOS_token]]))
     decoder_hidden = encoder_hidden # Use last hidden state from encoder to start decoder
+    decoder_cell = encoder_cell
     if USE_CUDA:
         decoder_input = decoder_input.cuda()
 
@@ -178,14 +194,14 @@ def train(input_variable, target_variable, encoder, decoder, encoder_optimizer, 
     if use_teacher_forcing:
         # Teacher forcing: Use the ground-truth target as the next input
         for di in range(target_length):
-            decoder_output, decoder_hidden = decoder(decoder_input, decoder_hidden)
+            decoder_output, (decoder_hidden, decoder_cell) = decoder(decoder_input, (decoder_hidden, decoder_cell))
             loss += criterion(decoder_output, target_variable[di])
             decoder_input = target_variable[di] # Next target is next input
 
     else:
         # Without teacher forcing: use network's own prediction as the next input
         for di in range(target_length):
-            decoder_output, decoder_hidden = decoder(decoder_input, decoder_hidden)
+            decoder_output, (decoder_hidden, decoder_cell) = decoder(decoder_input, (decoder_hidden, decoder_cell))
             loss += criterion(decoder_output, target_variable[di])
             # Get most likely word index (highest value) from output
             topv, topi = decoder_output.data.topk(1)
@@ -223,7 +239,8 @@ def evaluate(sentence, max_length=MAX_LENGTH):
 
     # Run through encoder
     encoder_hidden = encoder.init_hidden()
-    encoder_outputs, encoder_hidden = encoder(input_variable, encoder_hidden)
+    encoder_cell = encoder.init_cell()
+    encoder_outputs, (encoder_hidden, encoder_cell) = encoder(input_variable, (encoder_hidden, encoder_cell))
 
     # Create starting vectors for decoder
     decoder_input = Variable(torch.LongTensor([[SOS_token]])) # SOS
@@ -231,12 +248,13 @@ def evaluate(sentence, max_length=MAX_LENGTH):
         decoder_input = decoder_input.cuda()
 
     decoder_hidden = encoder_hidden
+    decoder_cell = encoder_cell
 
     decoded_words = []
 
     # Run through decoder
     for di in range(max_length):
-        decoder_output, decoder_hidden, = decoder(decoder_input, decoder_hidden)
+        decoder_output, (decoder_hidden, decoder_cell) = decoder(decoder_input, (decoder_hidden, decoder_cell))
 
         # Choose top word from output
         topv, topi = decoder_output.data.topk(1)
@@ -271,12 +289,13 @@ def show_plot(points):
     plt.plot(points)
 
 if to_train:
+    embedding_size = 50
     hidden_size = 50
     n_layers = 2
 
     # Initialize models
-    encoder = EncoderRNN(vocab.n_words, hidden_size, n_layers)
-    decoder = DecoderRNN(vocab.n_words, hidden_size, n_layers)
+    encoder = EncoderRNN(vocab.n_words, embedding_size, hidden_size, n_layers)
+    decoder = DecoderRNN(vocab.n_words, embedding_size, hidden_size, n_layers)
 
     # Move models to GPU
     if USE_CUDA:
@@ -322,18 +341,29 @@ if to_train:
             plot_loss_total = 0
             torch.save(encoder, 'encoder.pt')
             torch.save(decoder, 'decoder.pt')
+            evaluate_randomly()
 
     torch.save(encoder, 'encoder.pt')
     torch.save(decoder, 'decoder.pt')
 
+    print(plot_losses)
+
     show_plot(plot_losses)
 
+    evaluate_randomly()
+elif random_pair:
+    encoder = torch.load('encoder.pt')
+    decoder = torch.load('decoder.pt')
     evaluate_randomly()
 else:
     encoder = torch.load('encoder.pt')
     decoder = torch.load('decoder.pt')
-    evaluate_randomly()
 
+    words = input("Please enter a sentence: ")
+    output_words = evaluate(words)
+    output_sentence = ' '.join(output_words)
+
+    print(output_sentence + "\n")
 
 
 

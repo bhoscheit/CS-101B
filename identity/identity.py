@@ -20,18 +20,23 @@ USE_CUDA = True
 SOS_token = 0
 EOS_token = 1
 
-datafile = "100.txt"
+train_datafile = "100.txt"
+test_datafile = "test_100.txt"
 
 MAX_LENGTH = 10
 
-to_train = False
+test_size = 10
 
+# True if in training, False if in evaluating.
+to_train = True
+
+# True if evaluating a random pair, False if sentence from user.
 random_pair = False
 
 # Configuring training
 n_epochs = 50000
 plot_every = 50
-print_every = 1000
+print_every = 100
 
 class Lang:
     def __init__(self, name):
@@ -60,7 +65,7 @@ def normalize_string(s):
     s = re.sub(r"[^a-zA-Z.!?]+", r" ", s)
     return s
 
-def read_sentences():
+def read_sentences(datafile):
     print("Reading lines...")
 
     # Read the file and split into lines
@@ -71,8 +76,8 @@ def read_sentences():
 
     return pairs
 
-def prepare_data(vocab):
-    pairs = read_sentences()
+def prepare_data(vocab, datafile):
+    pairs = read_sentences(datafile)
     print("Read %s sentences" % len(pairs))
 
     print("Indexing words...")
@@ -83,7 +88,8 @@ def prepare_data(vocab):
 
 vocab = Lang("Script Vocab")
 
-vocab, pairs = prepare_data(vocab)
+vocab, pairs = prepare_data(vocab, train_datafile)
+vocab, test_pairs = prepare_data(vocab, test_datafile)
 
 # Return a list of indexes, one for each word in the sentence
 def indexes_from_sentence(vocab, sentence):
@@ -161,6 +167,42 @@ class DecoderRNN(nn.Module):
         cell = Variable(torch.zeros(self.n_layers, 1, self.hidden_size))
         if USE_CUDA: cell = cell.cuda()
         return cell
+
+def test(sentence, encoder, decoder, max_length = MAX_LENGTH):
+    input_variable = variable_from_sentence(vocab, sentence)
+    target_variable = variable_from_sentence(vocab, sentence)
+    input_length = input_variable.size()[0]
+
+    # Run through encoder
+    encoder_hidden = encoder.init_hidden()
+    encoder_cell = encoder.init_cell()
+    encoder_outputs, (encoder_hidden, encoder_cell) = encoder(input_variable, (encoder_hidden, encoder_cell))
+
+    # Create starting vectors for decoder
+    decoder_input = Variable(torch.LongTensor([[SOS_token]])) # SOS
+    if USE_CUDA:
+        decoder_input = decoder_input.cuda()
+
+    decoder_hidden = encoder_hidden
+    decoder_cell = encoder_cell
+
+    loss = 0 # Added onto for each word
+
+    # Run through decoder
+    for di in range(max_length):
+        decoder_output, (decoder_hidden, decoder_cell) = decoder(decoder_input, (decoder_hidden, decoder_cell))
+
+        # Choose top word from output
+        topv, topi = decoder_output.data.topk(1)
+        ni = topi[0][0]
+        loss += criterion(decoder_output, target_variable[di])
+        if ni == EOS_token:
+            break
+
+        # Next input is chosen word
+        decoder_input = Variable(torch.LongTensor([[ni]]))
+        if USE_CUDA: decoder_input = decoder_input.cuda()
+    return loss
 
 # Train!
 
@@ -316,8 +358,8 @@ if to_train:
 
     # Begin!
     for epoch in range(1, n_epochs+1):
-        if epoch % 5 == 0:
-            print("On epoch %d" % epoch)
+        #if epoch % 5 == 0:
+            #print("On epoch %d" % epoch)
         # Get training data for this cycle
         training_pair = variables_from_pair(random.choice(pairs))
         input_variable = training_pair[0]
@@ -327,13 +369,33 @@ if to_train:
         # Keep track of loss
         print_loss_total += loss
         plot_loss_total += loss
-        if epoch == 0: continue
-
+        if epoch == 1:
+            test_loss = []
+            for i in range(test_size):
+                testing_pair = random.choice(test_pairs)
+                inp = testing_pair[0]
+                test_loss.append(test(inp, encoder, decoder))
+            prev_avg_test_loss = sum(test_loss)/len(test_loss)
+            all_avg_test_loss = prev_avg_test_loss
         if epoch % print_every == 0:
+            test_loss = []
+            for i in range(test_size):
+                testing_pair = random.choice(test_pairs)
+                inp = testing_pair[0]
+                test_loss.append(test(inp, encoder, decoder))
+            avg_test_loss = sum(test_loss)/len(test_loss)
+            print("Average test loss:")
+            print(avg_test_loss)
+            all_avg_test_loss.append(avg_test_loss)
             print_loss_avg = print_loss_total / print_every
             print_loss_total = 0
             print_summary = '%s (%d %d%%) %.4f' % (time_since(start, epoch / n_epochs), epoch, epoch / n_epochs * 100, print_loss_avg)
             print(print_summary)
+            if abs(prev_avg_test_loss - avg_test_loss) < 0.1:
+                print("Average test losses:")
+                print(all_avg_test_loss)
+                break
+            prev_avg_test_loss = avg_test_loss
 
         if epoch % plot_every == 0:
             plot_loss_avg = plot_loss_total / plot_every

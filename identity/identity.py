@@ -20,12 +20,14 @@ USE_CUDA = True
 SOS_token = 0
 EOS_token = 1
 
-train_datafile = "100.txt"
-test_datafile = "test_100.txt"
+train_datafile = "1000.txt"
+test_datafile = "test_1000.txt"
 
 MAX_LENGTH = 10
 
-test_size = 10
+test_size = 200
+
+convergence_value = 0.0001
 
 # True if in training, False if in evaluating.
 to_train = True
@@ -34,7 +36,7 @@ to_train = True
 random_pair = False
 
 # Configuring training
-n_epochs = 50000
+n_epochs = 500000
 plot_every = 50
 print_every = 100
 
@@ -101,6 +103,11 @@ def variable_from_sentence(vocab, sentence):
     indexes.append(EOS_token)
     var = Variable(torch.LongTensor(indexes).view(-1, 1))
     #print('var =', var)
+    if USE_CUDA: var = var.cuda()
+    return var
+
+def variable_from_indexes(seq):
+    var = Variable(torch.LongTensor(seq).view(-1, 1))
     if USE_CUDA: var = var.cuda()
     return var
 
@@ -172,6 +179,7 @@ def test(sentence, encoder, decoder, max_length = MAX_LENGTH):
     input_variable = variable_from_sentence(vocab, sentence)
     target_variable = variable_from_sentence(vocab, sentence)
     input_length = input_variable.size()[0]
+    target_length = target_variable.size()[0]
 
     # Run through encoder
     encoder_hidden = encoder.init_hidden()
@@ -188,8 +196,10 @@ def test(sentence, encoder, decoder, max_length = MAX_LENGTH):
 
     loss = 0 # Added onto for each word
 
+    #TODO: bin lengths so target_length isn't used for loss.
+
     # Run through decoder
-    for di in range(max_length):
+    for di in range(target_length):
         decoder_output, (decoder_hidden, decoder_cell) = decoder(decoder_input, (decoder_hidden, decoder_cell))
 
         # Choose top word from output
@@ -202,7 +212,7 @@ def test(sentence, encoder, decoder, max_length = MAX_LENGTH):
         # Next input is chosen word
         decoder_input = Variable(torch.LongTensor([[ni]]))
         if USE_CUDA: decoder_input = decoder_input.cuda()
-    return loss
+    return loss/target_length
 
 # Train!
 
@@ -331,8 +341,8 @@ def show_plot(points):
     plt.plot(points)
 
 if to_train:
-    embedding_size = 50
-    hidden_size = 50
+    embedding_size = 10
+    hidden_size = 10
     n_layers = 2
 
     # Initialize models
@@ -358,8 +368,8 @@ if to_train:
 
     # Begin!
     for epoch in range(1, n_epochs+1):
-        #if epoch % 5 == 0:
-            #print("On epoch %d" % epoch)
+        if epoch % 500 == 0:
+            print("On epoch %d" % epoch)
         # Get training data for this cycle
         training_pair = variables_from_pair(random.choice(pairs))
         input_variable = training_pair[0]
@@ -375,15 +385,15 @@ if to_train:
                 testing_pair = random.choice(test_pairs)
                 inp = testing_pair[0]
                 test_loss.append(test(inp, encoder, decoder))
-            prev_avg_test_loss = sum(test_loss)/len(test_loss)
-            all_avg_test_loss = prev_avg_test_loss
+            prev_avg_test_loss = (sum(test_loss)/len(test_loss)).data[0]
+            all_avg_test_loss = [prev_avg_test_loss]
         if epoch % print_every == 0:
             test_loss = []
             for i in range(test_size):
                 testing_pair = random.choice(test_pairs)
                 inp = testing_pair[0]
                 test_loss.append(test(inp, encoder, decoder))
-            avg_test_loss = sum(test_loss)/len(test_loss)
+            avg_test_loss = (sum(test_loss)/len(test_loss)).data[0]
             print("Average test loss:")
             print(avg_test_loss)
             all_avg_test_loss.append(avg_test_loss)
@@ -391,14 +401,13 @@ if to_train:
             print_loss_total = 0
             print_summary = '%s (%d %d%%) %.4f' % (time_since(start, epoch / n_epochs), epoch, epoch / n_epochs * 100, print_loss_avg)
             print(print_summary)
-            if abs(prev_avg_test_loss - avg_test_loss) < 0.1:
+            if abs(prev_avg_test_loss - avg_test_loss) < convergence_value:
                 print("Average test losses:")
                 print(all_avg_test_loss)
                 break
             prev_avg_test_loss = avg_test_loss
 
-        if epoch % plot_every == 0:
-            plot_loss_avg = plot_loss_total / plot_every
+            plot_loss_avg = plot_loss_total / print_every
             plot_losses.append(plot_loss_avg)
             plot_loss_total = 0
             torch.save(encoder, 'encoder.pt')

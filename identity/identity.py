@@ -19,13 +19,16 @@ USE_CUDA = True
 
 SOS_token = 0
 EOS_token = 1
+PAD_token = 2
 
 train_datafile = "1000.txt"
-test_datafile = "test_1000.txt"
+test_datafile = "half_test_1000.txt"
 
 MAX_LENGTH = 10
 
-test_size = 200
+test_size = 500
+
+batch_size = 16
 
 convergence_value = 0.0001
 
@@ -40,16 +43,18 @@ n_epochs = 500000
 plot_every = 50
 print_every = 100
 
+bins = [5, 10, 50, 100, 1000]
+
 class Lang:
     def __init__(self, name):
         self.name = name
         self.word2index = {}
         self.word2count = {}
-        self.index2word = {0: "SOS", 1: "EOS"}
-        self.n_words = 2 # Count SOS and EOS
+        self.index2word = {0: "SOS", 1: "EOS", 2: "PAD"}
+        self.n_words = 3 # Count SOS, EOS, and PAD
 
     def index_words(self, sentence):
-        for word in sentence.split(' '):
+        for word in sentence:
             self.index_word(word)
 
     def index_word(self, word):
@@ -67,6 +72,18 @@ def normalize_string(s):
     s = re.sub(r"[^a-zA-Z.!?]+", r" ", s)
     return s
 
+def prepare_string(s):
+    s = normalize_string(s)
+    l = s.split(' ')
+    return l
+
+def pad(l):
+    for b in bins:
+        if len(l) == b:
+            return l
+        elif len(l) < b:
+            return l + ["PAD"] * (b - len(l))
+
 def read_sentences(datafile):
     print("Reading lines...")
 
@@ -74,28 +91,40 @@ def read_sentences(datafile):
     lines = open(datafile).read().strip().split('\n')
 
     # normalize
-    pairs = [[normalize_string(l), normalize_string(l)] for l in lines]
+    data = [pad(prepare_string(l)) for l in lines]
 
-    return pairs
+    return data
 
 def prepare_data(vocab, datafile):
-    pairs = read_sentences(datafile)
-    print("Read %s sentences" % len(pairs))
+    data = read_sentences(datafile)
+    print("Read %s sentences" % len(data))
 
     print("Indexing words...")
-    for pair in pairs:
-        vocab.index_words(pair[0])
+    for datum in data:
+        vocab.index_words(datum)
 
-    return vocab, pairs
+    ret_data = [[] for i in range(len(bins))]
+
+    for i in range(len(bins)):
+        for datum in data:
+            if len(datum) == bins[i]:
+                ret_data[i].append(datum)
+
+    num_sorted = 0
+    for b in ret_data:
+        num_sorted += len(b)
+    print("Sorted %d data." % num_sorted)
+
+    return vocab, ret_data
 
 vocab = Lang("Script Vocab")
 
-vocab, pairs = prepare_data(vocab, train_datafile)
-vocab, test_pairs = prepare_data(vocab, test_datafile)
+vocab, data = prepare_data(vocab, train_datafile)
+vocab, test_data = prepare_data(vocab, test_datafile)
 
 # Return a list of indexes, one for each word in the sentence
 def indexes_from_sentence(vocab, sentence):
-    return [vocab.word2index[word] for word in sentence.split(' ')]
+    return [vocab.word2index[word] for word in sentence]
 
 def variable_from_sentence(vocab, sentence):
     indexes = [SOS_token] # originally []
@@ -111,10 +140,9 @@ def variable_from_indexes(seq):
     if USE_CUDA: var = var.cuda()
     return var
 
-def variables_from_pair(pair):
-    input_variable = variable_from_sentence(vocab, pair[0])
-    target_variable = variable_from_sentence(vocab, pair[1])
-    return (input_variable, target_variable)
+def variable_from_datum(datum):
+    input_variable = variable_from_sentence(vocab, datum)
+    return input_variable
 
 class EncoderRNN(nn.Module):
     def __init__(self, vocab_size, embedding_size, hidden_size, n_layers=1):
@@ -175,11 +203,10 @@ class DecoderRNN(nn.Module):
         if USE_CUDA: cell = cell.cuda()
         return cell
 
-def test(sentence, encoder, decoder, max_length = MAX_LENGTH):
+def test(sentence, total_length, encoder, decoder, max_length = MAX_LENGTH):
     input_variable = variable_from_sentence(vocab, sentence)
-    target_variable = variable_from_sentence(vocab, sentence)
     input_length = input_variable.size()[0]
-    target_length = target_variable.size()[0]
+    assert(input_length == total_length)
 
     # Run through encoder
     encoder_hidden = encoder.init_hidden()
@@ -196,74 +223,66 @@ def test(sentence, encoder, decoder, max_length = MAX_LENGTH):
 
     loss = 0 # Added onto for each word
 
-    #TODO: bin lengths so target_length isn't used for loss.
-
     # Run through decoder
-    for di in range(target_length):
+    for di in range(total_length):
         decoder_output, (decoder_hidden, decoder_cell) = decoder(decoder_input, (decoder_hidden, decoder_cell))
 
         # Choose top word from output
         topv, topi = decoder_output.data.topk(1)
         ni = topi[0][0]
-        loss += criterion(decoder_output, target_variable[di])
-        if ni == EOS_token:
-            break
+        loss += criterion(decoder_output, input_variable[di])
 
         # Next input is chosen word
         decoder_input = Variable(torch.LongTensor([[ni]]))
         if USE_CUDA: decoder_input = decoder_input.cuda()
-    return loss/target_length
+    return loss/total_length
 
 # Train!
 
 teacher_forcing_ratio = 0.5
 clip = 5.0
 
-def train(input_variable, target_variable, encoder, decoder, encoder_optimizer, decoder_optimizer, criterion, max_length=MAX_LENGTH):
+def train(input_variables, total_length, encoder, decoder, encoder_optimizer, decoder_optimizer, criterion, max_length=MAX_LENGTH):
     # Zero gradients of both optimizers
     encoder_optimizer.zero_grad()
     decoder_optimizer.zero_grad()
     loss = 0 # Added onto for each word
 
-    # Get size of input and target sentences
-    input_length = input_variable.size()[0]
-    target_length = target_variable.size()[0]
+    for input_variable in input_variables:
 
-    # Run words through encoder
-    encoder_hidden = encoder.init_hidden()
-    encoder_cell = encoder.init_cell()
-    encoder_outputs, (encoder_hidden, encoder_cell) = encoder(input_variable, (encoder_hidden, encoder_cell))
+        # Run words through encoder
+        encoder_hidden = encoder.init_hidden()
+        encoder_cell = encoder.init_cell()
+        encoder_outputs, (encoder_hidden, encoder_cell) = encoder(input_variable, (encoder_hidden, encoder_cell))
 
-    # Prepare input and output variables
-    decoder_input = Variable(torch.LongTensor([[SOS_token]]))
-    decoder_hidden = encoder_hidden # Use last hidden state from encoder to start decoder
-    decoder_cell = encoder_cell
-    if USE_CUDA:
-        decoder_input = decoder_input.cuda()
+        # Prepare input and output variables
+        decoder_input = Variable(torch.LongTensor([[SOS_token]]))
+        decoder_hidden = encoder_hidden # Use last hidden state from encoder to start decoder
+        decoder_cell = encoder_cell
+        if USE_CUDA:
+            decoder_input = decoder_input.cuda()
 
-    # Choose whether to use teacher forcing
-    use_teacher_forcing = random.random() < teacher_forcing_ratio
-    if use_teacher_forcing:
-        # Teacher forcing: Use the ground-truth target as the next input
-        for di in range(target_length):
-            decoder_output, (decoder_hidden, decoder_cell) = decoder(decoder_input, (decoder_hidden, decoder_cell))
-            loss += criterion(decoder_output, target_variable[di])
-            decoder_input = target_variable[di] # Next target is next input
+        # Choose whether to use teacher forcing
+        use_teacher_forcing = random.random() < teacher_forcing_ratio
+        if use_teacher_forcing:
+            # Teacher forcing: Use the ground-truth target as the next input
+            for di in range(total_length):
+                decoder_output, (decoder_hidden, decoder_cell) = decoder(decoder_input, (decoder_hidden, decoder_cell))
+                loss += criterion(decoder_output, input_variable[di])
+                decoder_input = input_variable[di] # Next target is next input
 
-    else:
-        # Without teacher forcing: use network's own prediction as the next input
-        for di in range(target_length):
-            decoder_output, (decoder_hidden, decoder_cell) = decoder(decoder_input, (decoder_hidden, decoder_cell))
-            loss += criterion(decoder_output, target_variable[di])
-            # Get most likely word index (highest value) from output
-            topv, topi = decoder_output.data.topk(1)
-            ni = topi[0][0]
+        else:
+            # Without teacher forcing: use network's own prediction as the next input
+            for di in range(total_length):
+                decoder_output, (decoder_hidden, decoder_cell) = decoder(decoder_input, (decoder_hidden, decoder_cell))
+                loss += criterion(decoder_output, input_variable[di])
+                # Get most likely word index (highest value) from output
+                topv, topi = decoder_output.data.topk(1)
+                ni = topi[0][0]
 
-            decoder_input = Variable(torch.LongTensor([[ni]])) # Chosen word is next input
-            if USE_CUDA: decoder_input = decoder_input.cuda()
+                decoder_input = Variable(torch.LongTensor([[ni]])) # Chosen word is next input
+                if USE_CUDA: decoder_input = decoder_input.cuda()
 
-            # Stop at end of sentence (not necessary when using known targets)
-            if ni == EOS_token: break
     # Backpropagation
     loss.backward()
     torch.nn.utils.clip_grad_norm(encoder.parameters(), clip)
@@ -271,7 +290,7 @@ def train(input_variable, target_variable, encoder, decoder, encoder_optimizer, 
     encoder_optimizer.step()
     decoder_optimizer.step()
 
-    return loss.data[0] / target_length
+    return loss.data[0] / (total_length * len(input_variables))
 
 def as_minutes(s):
     m = math.floor(s / 60)
@@ -285,7 +304,7 @@ def time_since(since, percent):
     rs = es - s
     return '%s (- %s)' % (as_minutes(s), as_minutes(rs))
 
-def evaluate(sentence, max_length=MAX_LENGTH):
+def evaluate(sentence, total_length):
     input_variable = variable_from_sentence(vocab, sentence)
     input_length = input_variable.size()[0]
 
@@ -305,31 +324,26 @@ def evaluate(sentence, max_length=MAX_LENGTH):
     decoded_words = []
 
     # Run through decoder
-    for di in range(max_length):
+    for di in range(bin_length):
         decoder_output, (decoder_hidden, decoder_cell) = decoder(decoder_input, (decoder_hidden, decoder_cell))
 
         # Choose top word from output
         topv, topi = decoder_output.data.topk(1)
         ni = topi[0][0]
-        if ni == EOS_token:
-            decoded_words.append('EOS')
-            break
-        else:
-            decoded_words.append(vocab.index2word[ni])
+        decoded_words.append(vocab.index2word[ni])
 
         # Next input is chosen word
         decoder_input = Variable(torch.LongTensor([[ni]]))
         if USE_CUDA: decoder_input = decoder_input.cuda()
     return decoded_words
 
-def evaluate_randomly():
-    pair = random.choice(pairs)
+def evaluate_randomly(bin_i):
+    datum = random.choice(data[bin_i])
 
-    output_words = evaluate(pair[0])
+    output_words = evaluate(datum, bins[bin_i] + 2) # +2 for SOS and EOS
     output_sentence = ' '.join(output_words)
 
-    print('>', pair[0])
-    print('=', pair[1])
+    print('>', datum)
     print('<', output_sentence)
     print('')
 
@@ -366,33 +380,37 @@ if to_train:
     print_loss_total = 0 # Reset every print_every
     plot_loss_total = 0 # Reset every plot_every
 
+    # TODO: implement abilities for more bins.
+
+    bin_i = 0
+
+    total_length = bins[bin_i] + 2 # +2 for SOS and EOS.
+
     # Begin!
     for epoch in range(1, n_epochs+1):
         if epoch % 500 == 0:
             print("On epoch %d" % epoch)
         # Get training data for this cycle
-        training_pair = variables_from_pair(random.choice(pairs))
-        input_variable = training_pair[0]
-        target_variable = training_pair[1]
+        input_variables = []
+        for i in range(batch_size):
+            input_variables.append(variable_from_datum(random.choice(data[bin_i])))
         # Run the train function
-        loss = train(input_variable, target_variable, encoder, decoder, encoder_optimizer, decoder_optimizer, criterion)
+        loss = train(input_variables, total_length, encoder, decoder, encoder_optimizer, decoder_optimizer, criterion)
         # Keep track of loss
         print_loss_total += loss
         plot_loss_total += loss
         if epoch == 1:
             test_loss = []
-            for i in range(test_size):
-                testing_pair = random.choice(test_pairs)
-                inp = testing_pair[0]
-                test_loss.append(test(inp, encoder, decoder))
+            for i in range(len(test_data[bin_i])):
+                testing_input = test_data[bin_i][i]
+                test_loss.append(test(testing_input, total_length, encoder, decoder))
             prev_avg_test_loss = (sum(test_loss)/len(test_loss)).data[0]
             all_avg_test_loss = [prev_avg_test_loss]
         if epoch % print_every == 0:
             test_loss = []
-            for i in range(test_size):
-                testing_pair = random.choice(test_pairs)
-                inp = testing_pair[0]
-                test_loss.append(test(inp, encoder, decoder))
+            for i in range(len(test_data[bin_i])):
+                testing_input = test_data[bin_i][i]
+                test_loss.append(test(testing_input, total_length, encoder, decoder))
             avg_test_loss = (sum(test_loss)/len(test_loss)).data[0]
             print("Average test loss:")
             print(avg_test_loss)
@@ -412,7 +430,7 @@ if to_train:
             plot_loss_total = 0
             torch.save(encoder, 'encoder.pt')
             torch.save(decoder, 'decoder.pt')
-            evaluate_randomly()
+            evaluate_randomly(bin_i)
 
     torch.save(encoder, 'encoder.pt')
     torch.save(decoder, 'decoder.pt')
@@ -421,17 +439,25 @@ if to_train:
 
     show_plot(plot_losses)
 
-    evaluate_randomly()
-elif random_pair:
+    evaluate_randomly(bin_i)
+elif random_datum:
+    bin_i = 0
+
+    total_length = bins[bin_i] + 2 # +2 for SOS and EOS.
+
     encoder = torch.load('encoder.pt')
     decoder = torch.load('decoder.pt')
-    evaluate_randomly()
+    evaluate_randomly(bin_i)
 else:
+    bin_i = 0
+
+    total_length = bins[bin_i] + 2 # +2 for SOS and EOS.
+
     encoder = torch.load('encoder.pt')
     decoder = torch.load('decoder.pt')
 
     words = input("Please enter a sentence: ")
-    output_words = evaluate(words)
+    output_words = evaluate(words, total_length)
     output_sentence = ' '.join(output_words)
 
     print(output_sentence + "\n")

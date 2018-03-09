@@ -35,8 +35,9 @@ convergence_value = 0.0001
 # True if in training, False if in evaluating.
 to_train = True
 
+# Only relevant if to_train is true.
 # True if evaluating a random pair, False if sentence from user.
-random_pair = False
+random_datum = False
 
 # Configuring training
 n_epochs = 500000
@@ -206,7 +207,6 @@ class DecoderRNN(nn.Module):
 def test(sentence, total_length, encoder, decoder, max_length = MAX_LENGTH):
     input_variable = variable_from_sentence(vocab, sentence)
     input_length = input_variable.size()[0]
-    assert(input_length == total_length)
 
     # Run through encoder
     encoder_hidden = encoder.init_hidden()
@@ -222,6 +222,8 @@ def test(sentence, total_length, encoder, decoder, max_length = MAX_LENGTH):
     decoder_cell = encoder_cell
 
     loss = 0 # Added onto for each word
+
+    # TODO: allow for different lengths
 
     # Run through decoder
     for di in range(total_length):
@@ -242,46 +244,46 @@ def test(sentence, total_length, encoder, decoder, max_length = MAX_LENGTH):
 teacher_forcing_ratio = 0.5
 clip = 5.0
 
-def train(input_variables, total_length, encoder, decoder, encoder_optimizer, decoder_optimizer, criterion, max_length=MAX_LENGTH):
+def train(input_variable, total_length, encoder, decoder, encoder_optimizer, decoder_optimizer, criterion, max_length=MAX_LENGTH):
     # Zero gradients of both optimizers
     encoder_optimizer.zero_grad()
     decoder_optimizer.zero_grad()
     loss = 0 # Added onto for each word
 
-    for input_variable in input_variables:
+    # Run words through encoder
+    encoder_hidden = encoder.init_hidden()
+    encoder_cell = encoder.init_cell()
+    encoder_outputs, (encoder_hidden, encoder_cell) = encoder(input_variable, (encoder_hidden, encoder_cell))
 
-        # Run words through encoder
-        encoder_hidden = encoder.init_hidden()
-        encoder_cell = encoder.init_cell()
-        encoder_outputs, (encoder_hidden, encoder_cell) = encoder(input_variable, (encoder_hidden, encoder_cell))
+    # Prepare input and output variables
+    decoder_input = Variable(torch.LongTensor([[SOS_token]]))
+    decoder_hidden = encoder_hidden # Use last hidden state from encoder to start decoder
+    decoder_cell = encoder_cell
+    if USE_CUDA:
+        decoder_input = decoder_input.cuda()
 
-        # Prepare input and output variables
-        decoder_input = Variable(torch.LongTensor([[SOS_token]]))
-        decoder_hidden = encoder_hidden # Use last hidden state from encoder to start decoder
-        decoder_cell = encoder_cell
-        if USE_CUDA:
-            decoder_input = decoder_input.cuda()
+    # TODO: don't require that output havve the same size as the input.
 
-        # Choose whether to use teacher forcing
-        use_teacher_forcing = random.random() < teacher_forcing_ratio
-        if use_teacher_forcing:
-            # Teacher forcing: Use the ground-truth target as the next input
-            for di in range(total_length):
-                decoder_output, (decoder_hidden, decoder_cell) = decoder(decoder_input, (decoder_hidden, decoder_cell))
-                loss += criterion(decoder_output, input_variable[di])
-                decoder_input = input_variable[di] # Next target is next input
+    # Choose whether to use teacher forcing
+    use_teacher_forcing = random.random() < teacher_forcing_ratio
+    if use_teacher_forcing:
+        # Teacher forcing: Use the ground-truth target as the next input
+        for di in range(total_length):
+            decoder_output, (decoder_hidden, decoder_cell) = decoder(decoder_input, (decoder_hidden, decoder_cell))
+            loss += criterion(decoder_output, input_variable[di])
+            decoder_input = input_variable[di] # Next target is next input
 
-        else:
-            # Without teacher forcing: use network's own prediction as the next input
-            for di in range(total_length):
-                decoder_output, (decoder_hidden, decoder_cell) = decoder(decoder_input, (decoder_hidden, decoder_cell))
-                loss += criterion(decoder_output, input_variable[di])
-                # Get most likely word index (highest value) from output
-                topv, topi = decoder_output.data.topk(1)
-                ni = topi[0][0]
+    else:
+        # Without teacher forcing: use network's own prediction as the next input
+        for di in range(total_length):
+            decoder_output, (decoder_hidden, decoder_cell) = decoder(decoder_input, (decoder_hidden, decoder_cell))
+            loss += criterion(decoder_output, input_variable[di])
+            # Get most likely word index (highest value) from output
+            topv, topi = decoder_output.data.topk(1)
+            ni = topi[0][0]
 
-                decoder_input = Variable(torch.LongTensor([[ni]])) # Chosen word is next input
-                if USE_CUDA: decoder_input = decoder_input.cuda()
+            decoder_input = Variable(torch.LongTensor([[ni]])) # Chosen word is next input
+            if USE_CUDA: decoder_input = decoder_input.cuda()
 
     # Backpropagation
     loss.backward()
@@ -304,7 +306,7 @@ def time_since(since, percent):
     rs = es - s
     return '%s (- %s)' % (as_minutes(s), as_minutes(rs))
 
-def evaluate(sentence, total_length):
+def evaluate(sentence):
     input_variable = variable_from_sentence(vocab, sentence)
     input_length = input_variable.size()[0]
 
@@ -323,8 +325,10 @@ def evaluate(sentence, total_length):
 
     decoded_words = []
 
+    # TODO: allow other lengths
+
     # Run through decoder
-    for di in range(bin_length):
+    for di in range(input_length):
         decoder_output, (decoder_hidden, decoder_cell) = decoder(decoder_input, (decoder_hidden, decoder_cell))
 
         # Choose top word from output
@@ -391,11 +395,12 @@ if to_train:
         if epoch % 500 == 0:
             print("On epoch %d" % epoch)
         # Get training data for this cycle
-        input_variables = []
+        '''input_variables = []
         for i in range(batch_size):
-            input_variables.append(variable_from_datum(random.choice(data[bin_i])))
+            input_variables.append(variable_from_datum(random.choice(data[bin_i])))'''
+        input_variable = variable_from_datum(random.choice(data[bin_i]))
         # Run the train function
-        loss = train(input_variables, total_length, encoder, decoder, encoder_optimizer, decoder_optimizer, criterion)
+        loss = train(input_variable, total_length, encoder, decoder, encoder_optimizer, decoder_optimizer, criterion)
         # Keep track of loss
         print_loss_total += loss
         plot_loss_total += loss

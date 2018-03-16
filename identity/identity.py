@@ -44,7 +44,7 @@ n_epochs = 500000
 plot_every = 50
 print_every = 100
 
-bins = [5, 10, 50, 100, 1000]
+bins = [7, 12, 52, 102, 1002] # Everything is a normal number + 2 for SOS and EOS.
 
 class Lang:
     def __init__(self, name):
@@ -78,7 +78,11 @@ def prepare_string(s):
     l = s.split(' ')
     return l
 
+# This makes sure that the length of each line is exactly the
+# value in its bin.
+
 def pad(l):
+    l = ["SOS"] + l + ["EOS"]
     for b in bins:
         if len(l) == b:
             return l
@@ -128,9 +132,7 @@ def indexes_from_sentence(vocab, sentence):
     return [vocab.word2index[word] for word in sentence]
 
 def variable_from_sentence(vocab, sentence):
-    indexes = [SOS_token] # originally []
-    indexes.extend(indexes_from_sentence(vocab, sentence))
-    indexes.append(EOS_token)
+    indexes = indexes_from_sentence(vocab, sentence)
     var = Variable(torch.LongTensor(indexes).view(-1, 1))
     #print('var =', var)
     if USE_CUDA: var = var.cuda()
@@ -292,7 +294,7 @@ def train(input_variable, total_length, encoder, decoder, encoder_optimizer, dec
     encoder_optimizer.step()
     decoder_optimizer.step()
 
-    return loss.data[0] / (total_length * len(input_variables))
+    return loss.data[0] / total_length
 
 def as_minutes(s):
     m = math.floor(s / 60)
@@ -306,7 +308,7 @@ def time_since(since, percent):
     rs = es - s
     return '%s (- %s)' % (as_minutes(s), as_minutes(rs))
 
-def evaluate(sentence):
+def evaluate(sentence, total_length):
     input_variable = variable_from_sentence(vocab, sentence)
     input_length = input_variable.size()[0]
 
@@ -328,7 +330,7 @@ def evaluate(sentence):
     # TODO: allow other lengths
 
     # Run through decoder
-    for di in range(input_length):
+    for di in range(total_length):
         decoder_output, (decoder_hidden, decoder_cell) = decoder(decoder_input, (decoder_hidden, decoder_cell))
 
         # Choose top word from output
@@ -388,7 +390,7 @@ if to_train:
 
     bin_i = 0
 
-    total_length = bins[bin_i] + 2 # +2 for SOS and EOS.
+    total_length = bins[bin_i]
 
     # Begin!
     for epoch in range(1, n_epochs+1):

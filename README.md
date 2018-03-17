@@ -2,5 +2,4 @@
 
 Deep Generative Models for:
 
-- Music generation
 - Script generation
